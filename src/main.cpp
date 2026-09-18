@@ -35,7 +35,6 @@ constexpr float GYRO_LSB_PER_DPS = 131.0f;    // ±250 deg/s
 
 constexpr float G_TO_MS2 = 9.80665f;
 
-// Avoid collision with Arduino.h's DEG_TO_RAD macro
 constexpr float D2R = 0.017453292519943295f;
 constexpr float R2D = 57.29577951308232f;
 
@@ -43,16 +42,36 @@ constexpr float TARGET_DT = 0.005f;
 constexpr float TARGET_HZ = 200.0f;
 
 // ============================================================
-// SERVO HARDWARE
+// SERVO HARDWARE — 4 SERVOS
 // ============================================================
+//
+// Y_POS : Y-axis positive deflection
+// Y_NEG : Y-axis complementary (opposite of Y_POS)
+// X_POS : X-axis positive deflection
+// X_NEG : X-axis complementary (opposite of X_POS)
+//
+// Servo angle range: 45° – 135°
+// Center: 90°
+//
+// GPIO note: pin 22 is NOT available on ESP32-S3-DevKitC-1.
+// X_NEG is therefore mapped to GPIO 4.
+//
 
-constexpr int SERVO_PIN       = 18;
-constexpr int SERVO_MIN_DEG   = 0;
-constexpr int SERVO_MAX_DEG   = 180;
-constexpr int SERVO_START_DEG = 90;
-constexpr int SERVO_CENTER_DEG = 90;
+constexpr int SERVO_Y_POS_PIN = 18;
+constexpr int SERVO_Y_NEG_PIN = 19;
+constexpr int SERVO_X_POS_PIN = 21;
+constexpr int SERVO_X_NEG_PIN = 4;   // was 22 — not on DevKitC-1 header
 
-Servo testServo;
+constexpr int SERVO_MIN_DEG      = 45;
+constexpr int SERVO_MAX_DEG      = 135;
+constexpr int SERVO_CENTER_DEG   = 90;
+constexpr int SERVO_START_DEG    = 90;
+constexpr int SERVO_MAX_DEFLECT  = 45;
+
+Servo servoYPos;
+Servo servoYNeg;
+Servo servoXPos;
+Servo servoXNeg;
 
 // ============================================================
 // CONTROL MODE
@@ -67,18 +86,28 @@ enum ControlMode
 ControlMode currentMode = MODE_MANUAL;
 
 // ============================================================
-// PID CONTROLLER (attitude-hold demo)
+// PID CONTROLLERS (Roll + Pitch)
 // ============================================================
 
-constexpr float PID_KP = 0.5f;
-constexpr float PID_KI = 0.0f;
-constexpr float PID_KD = 0.05f;
+// Roll PID (drives X servos)
+constexpr float PID_ROLL_KP = 0.5f;
+constexpr float PID_ROLL_KI = 0.0f;
+constexpr float PID_ROLL_KD = 0.05f;
 
+float pidRollIntegral  = 0.0f;
+float pidRollPrevError = 0.0f;
+
+// Pitch PID (drives Y servos)
+constexpr float PID_PITCH_KP = 0.5f;
+constexpr float PID_PITCH_KI = 0.0f;
+constexpr float PID_PITCH_KD = 0.05f;
+
+float pidPitchIntegral  = 0.0f;
+float pidPitchPrevError = 0.0f;
+
+// Shared limits
 constexpr float PID_INTEGRAL_CLAMP = 10.0f;
-constexpr float PID_OUTPUT_CLAMP   = 15.0f;
-
-float pidIntegral  = 0.0f;
-float pidPrevError = 0.0f;
+constexpr float PID_OUTPUT_CLAMP   = 30.0f;
 
 // ============================================================
 // ACCELEROMETER CALIBRATION
@@ -189,9 +218,9 @@ struct IMUData
     float ay;
     float az;
 
-    float gx;   // deg/s
-    float gy;   // deg/s
-    float gz;   // deg/s
+    float gx;
+    float gy;
+    float gz;
 };
 
 IMUData imu;
@@ -284,7 +313,7 @@ void quaternionMultiply(
 }
 
 // ============================================================
-// QUATERNION → ROLL / PITCH (degrees)
+// QUATERNION → ROLL / PITCH
 // ============================================================
 
 float getRollDeg()
@@ -984,6 +1013,28 @@ void updateNavigation(const IMUData &data, float dt)
 }
 
 // ============================================================
+// PID HELPER
+// ============================================================
+
+float runPID(
+    float error,
+    float dt,
+    float &integral,
+    float &prevError,
+    float kp, float ki, float kd)
+{
+    integral += error * dt;
+    integral = constrain(integral, -PID_INTEGRAL_CLAMP, PID_INTEGRAL_CLAMP);
+
+    float derivative = (error - prevError) / dt;
+    prevError = error;
+
+    float output = kp * error + ki * integral + kd * derivative;
+
+    return constrain(output, -PID_OUTPUT_CLAMP, PID_OUTPUT_CLAMP);
+}
+
+// ============================================================
 // SERVO CONTROL UPDATE (Auto mode)
 // ============================================================
 
@@ -992,30 +1043,55 @@ void updateServoControl(float dt)
     if (currentMode == MODE_MANUAL)
         return;
 
-    float rollDeg = getRollDeg();
-    float error   = 0.0f - rollDeg;
+    // --------------------------------------------------------
+    // Roll (X axis)
+    // --------------------------------------------------------
 
-    pidIntegral += error * dt;
-    pidIntegral = constrain(
-        pidIntegral,
-        -PID_INTEGRAL_CLAMP,
-        PID_INTEGRAL_CLAMP
+    float rollDeg  = getRollDeg();
+    float rollErr  = 0.0f - rollDeg;
+
+    float rollCmd = runPID(
+        rollErr, dt,
+        pidRollIntegral,
+        pidRollPrevError,
+        PID_ROLL_KP, PID_ROLL_KI, PID_ROLL_KD
     );
 
-    float derivative = (error - pidPrevError) / dt;
-    pidPrevError = error;
+    int xPosAngle = SERVO_CENTER_DEG + (int)rollCmd;
+    int xNegAngle = SERVO_CENTER_DEG - (int)rollCmd;
 
-    float command =
-          PID_KP * error
-        + PID_KI * pidIntegral
-        + PID_KD * derivative;
+    xPosAngle = constrain(xPosAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+    xNegAngle = constrain(xNegAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
 
-    command = constrain(command, -PID_OUTPUT_CLAMP, PID_OUTPUT_CLAMP);
+    servoXPos.write(xPosAngle);
+    servoXNeg.write(xNegAngle);
 
-    int servoAngle = SERVO_CENTER_DEG + (int)command;
-    servoAngle = constrain(servoAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+    // --------------------------------------------------------
+    // Pitch (Y axis)
+    // --------------------------------------------------------
 
-    testServo.write(servoAngle);
+    float pitchDeg = getPitchDeg();
+    float pitchErr = 0.0f - pitchDeg;
+
+    float pitchCmd = runPID(
+        pitchErr, dt,
+        pidPitchIntegral,
+        pidPitchPrevError,
+        PID_PITCH_KP, PID_PITCH_KI, PID_PITCH_KD
+    );
+
+    int yPosAngle = SERVO_CENTER_DEG + (int)pitchCmd;
+    int yNegAngle = SERVO_CENTER_DEG - (int)pitchCmd;
+
+    yPosAngle = constrain(yPosAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+    yNegAngle = constrain(yNegAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+
+    servoYPos.write(yPosAngle);
+    servoYNeg.write(yNegAngle);
+
+    // --------------------------------------------------------
+    // Debug (10 Hz)
+    // --------------------------------------------------------
 
     static int debugCounter = 0;
     debugCounter++;
@@ -1026,13 +1102,42 @@ void updateServoControl(float dt)
 
         Serial.print("[AUTO] Roll=");
         Serial.print(rollDeg, 2);
-        Serial.print("  err=");
-        Serial.print(error, 2);
-        Serial.print("  cmd=");
-        Serial.print(command, 2);
-        Serial.print("  servo=");
-        Serial.println(servoAngle);
+        Serial.print(" Pitch=");
+        Serial.print(pitchDeg, 2);
+        Serial.print(" | Xp=");
+        Serial.print(xPosAngle);
+        Serial.print(" Xn=");
+        Serial.print(xNegAngle);
+        Serial.print(" Yp=");
+        Serial.print(yPosAngle);
+        Serial.print(" Yn=");
+        Serial.println(yNegAngle);
     }
+}
+
+// ============================================================
+// MANUAL SERVO SET (all 4 servos)
+// ============================================================
+
+void setAllServosManual(int primaryAngle)
+{
+    int positive = constrain(primaryAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+    int negative = constrain(180 - primaryAngle, SERVO_MIN_DEG, SERVO_MAX_DEG);
+
+    servoXPos.write(positive);
+    servoXNeg.write(negative);
+    servoYPos.write(positive);
+    servoYNeg.write(negative);
+
+    Serial.print("SERVO (manual) ");
+    Serial.print("Xp=");
+    Serial.print(positive);
+    Serial.print(" Xn=");
+    Serial.print(negative);
+    Serial.print(" Yp=");
+    Serial.print(positive);
+    Serial.print(" Yn=");
+    Serial.println(negative);
 }
 
 // ============================================================
@@ -1056,8 +1161,12 @@ void handleSerialInput()
                 if (buffer.equalsIgnoreCase("AUTO"))
                 {
                     currentMode = MODE_AUTO;
-                    pidIntegral  = 0.0f;
-                    pidPrevError = 0.0f;
+
+                    pidRollIntegral   = 0.0f;
+                    pidRollPrevError  = 0.0f;
+                    pidPitchIntegral  = 0.0f;
+                    pidPitchPrevError = 0.0f;
+
                     Serial.println(">>> MODE: AUTO (attitude hold)");
                 }
                 else if (buffer.equalsIgnoreCase("MAN"))
@@ -1067,8 +1176,10 @@ void handleSerialInput()
                 }
                 else if (buffer.equalsIgnoreCase("LEVEL"))
                 {
-                    pidIntegral  = 0.0f;
-                    pidPrevError = 0.0f;
+                    pidRollIntegral   = 0.0f;
+                    pidRollPrevError  = 0.0f;
+                    pidPitchIntegral  = 0.0f;
+                    pidPitchPrevError = 0.0f;
                     Serial.println(">>> PID state reset");
                 }
                 else
@@ -1079,10 +1190,7 @@ void handleSerialInput()
                         angle >= SERVO_MIN_DEG &&
                         angle <= SERVO_MAX_DEG)
                     {
-                        testServo.write(angle);
-                        Serial.print("SERVO (manual) = ");
-                        Serial.print(angle);
-                        Serial.println(" deg");
+                        setAllServosManual(angle);
                     }
                     else if (currentMode == MODE_AUTO)
                     {
@@ -1090,7 +1198,9 @@ void handleSerialInput()
                     }
                     else
                     {
-                        Serial.println("Unknown. Use AUTO, MAN, LEVEL, or 0-180.");
+                        Serial.println(
+                            "Unknown. Use AUTO, MAN, LEVEL, or 45-135."
+                        );
                     }
                 }
             }
@@ -1208,7 +1318,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println("ESP32-S3 + MPU6500 NAVIGATION + SERVO");
+    Serial.println("ESP32-S3 + MPU6500 NAVIGATION + 4 SERVOS");
     Serial.println("6-AXIS IMU / MAHONY / 15-STATE ES-EKF");
     Serial.println("============================================");
 
@@ -1244,20 +1354,39 @@ void setup()
     Serial.println();
 
     // --------------------------------------------------------
-    // SERVO INITIALIZATION
+    // 4-SERVO INITIALIZATION
     // --------------------------------------------------------
 
-    testServo.setPeriodHertz(50);
-    testServo.attach(SERVO_PIN, 500, 2400);
-    testServo.write(SERVO_START_DEG);
+    servoYPos.setPeriodHertz(50);
+    servoYNeg.setPeriodHertz(50);
+    servoXPos.setPeriodHertz(50);
+    servoXNeg.setPeriodHertz(50);
 
-    Serial.println("Servo initialized at 90 degrees.");
+    servoYPos.attach(SERVO_Y_POS_PIN, 500, 2400);
+    servoYNeg.attach(SERVO_Y_NEG_PIN, 500, 2400);
+    servoXPos.attach(SERVO_X_POS_PIN, 500, 2400);
+    servoXNeg.attach(SERVO_X_NEG_PIN, 500, 2400);
+
+    servoYPos.write(SERVO_START_DEG);
+    servoYNeg.write(SERVO_START_DEG);
+    servoXPos.write(SERVO_START_DEG);
+    servoXNeg.write(SERVO_START_DEG);
+
+    Serial.println("Servos initialized at 90 degrees:");
+    Serial.print("  Y_POS = GPIO ");
+    Serial.println(SERVO_Y_POS_PIN);
+    Serial.print("  Y_NEG = GPIO ");
+    Serial.println(SERVO_Y_NEG_PIN);
+    Serial.print("  X_POS = GPIO ");
+    Serial.println(SERVO_X_POS_PIN);
+    Serial.print("  X_NEG = GPIO ");
+    Serial.println(SERVO_X_NEG_PIN);
     Serial.println();
     Serial.println("Commands:");
-    Serial.println("  AUTO   -> attitude hold (PID controls servo)");
-    Serial.println("  MAN    -> manual mode (numbers control servo)");
+    Serial.println("  AUTO   -> attitude hold (PID controls servos)");
+    Serial.println("  MAN    -> manual mode");
     Serial.println("  LEVEL  -> reset PID state");
-    Serial.println("  0..180 -> servo angle (MANUAL mode only)");
+    Serial.println("  45..135 -> primary angle (MANUAL mode)");
     Serial.println();
     Serial.println("Keep the IMU stationary for startup.");
     Serial.println();
@@ -1269,15 +1398,7 @@ void setup()
 
 void loop()
 {
-    // --------------------------------------------------------
-    // ALWAYS process serial first
-    // --------------------------------------------------------
-
     handleSerialInput();
-
-    // --------------------------------------------------------
-    // Atomically consume DATA READY flag
-    // --------------------------------------------------------
 
     noInterrupts();
     bool dataReady = imuDataReady;
@@ -1287,10 +1408,6 @@ void loop()
     if (!dataReady)
         return;
 
-    // --------------------------------------------------------
-    // Timing
-    // --------------------------------------------------------
-
     static uint32_t previousMicros = 0;
 
     uint32_t currentMicros = micros();
@@ -1298,22 +1415,14 @@ void loop()
     float dt;
 
     if (previousMicros == 0)
-    {
         dt = TARGET_DT;
-    }
     else
-    {
         dt = (currentMicros - previousMicros) * 1.0e-6f;
-    }
 
     previousMicros = currentMicros;
 
     if (dt <= 0.0f || dt > 0.02f)
         dt = TARGET_DT;
-
-    // --------------------------------------------------------
-    // Read IMU
-    // --------------------------------------------------------
 
     if (!readIMU(imu))
     {
@@ -1321,21 +1430,9 @@ void loop()
         return;
     }
 
-    // --------------------------------------------------------
-    // Navigation + EKF
-    // --------------------------------------------------------
-
     updateNavigation(imu, dt);
 
-    // --------------------------------------------------------
-    // Servo control (auto mode only)
-    // --------------------------------------------------------
-
     updateServoControl(dt);
-
-    // --------------------------------------------------------
-    // Print navigation at ~10 Hz
-    // --------------------------------------------------------
 
     static int printCounter = 0;
     printCounter++;
