@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "saved_at": "2026-09-18T01:56:42",
+  "last_command": "LOAD",
+  "mission_name": "target_bravo",
+  "inputs": {
+    "launch_long": "88.36",
+    "launch_lat": "22.57",
+    "launch_height": "10",
+    "impact_long": "88.40",
+    "impact_lat": "22.59",
+    "impact_height": "0"
+  },
+  "detonation": {
+    "type": "Proximity",
+    "timing_label": "T+Proximity"
+  },
+  "last_outputs": {
+    "time_to_impact": "5.84 s",
+    "time_to_detonation": "5.34 s",
+    "progress": 15,
+    "mono_code": "DIST: 4668m"
+  }
+}

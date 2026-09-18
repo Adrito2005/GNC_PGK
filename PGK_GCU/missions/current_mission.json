@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "saved_at": "2026-09-18T01:56:47",
+  "last_command": "LOAD",
+  "mission_name": "current_mission",
+  "inputs": {
+    "launch_long": "88.36",
+    "launch_lat": "22.57",
+    "launch_height": "10",
+    "impact_long": "88.41",
+    "impact_lat": "22.58",
+    "impact_height": "0"
+  },
+  "detonation": {
+    "type": "Proximity",
+    "timing_label": "T+Proximity"
+  },
+  "last_outputs": {
+    "time_to_impact": "6.57 s",
+    "time_to_detonation": "6.07 s",
+    "progress": 17,
+    "mono_code": "DIST: 5257m"
+  }
+}
